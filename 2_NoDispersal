@@ -1,0 +1,79 @@
+# Calculate range loss under no-dispersal scenarios
+library(terra)
+library(fs)
+library(dplyr)
+
+# Directory structure
+base_dir <- "./results/"
+species_dirs <- dir_ls(base_dir, type = "directory")
+scenarios <- c("ssp119", "ssp585")
+
+# Calculate no-dispersal range
+calc_no_dispersal <- function(baseline, future) {
+  future * baseline
+}
+
+# Main processing loop
+range_loss_results <- data.frame()
+
+for (sp_dir in species_dirs) {
+  sp_name <- basename(sp_dir)
+  cat("Processing:", sp_name, "\n")
+  
+  # Load baseline
+  baseline <- rast(
+    dir_ls(file.path(sp_dir, "projections/baseline/"), glob = "*.tif")
+  )
+  baseline_sum <- global(baseline, "sum", na.rm = TRUE)[1, 1]
+  
+  # Process each scenario
+  for (scenario in scenarios) {
+    cat("  Scenario:", scenario, "\n")
+    
+    future_dir <- file.path(sp_dir, "projections", scenario)
+    future_files <- dir_ls(future_dir, glob = "*.tif")
+    
+    # Create output directory
+    out_dir <- file.path(sp_dir, "projections", paste0(scenario, "_no_dispersal"))
+    dir_create(out_dir)
+    
+    # Process each time period
+    for (future_file in future_files) {
+      time_period <- tools::file_path_sans_ext(basename(future_file))
+      cat("    Period:", time_period, "\n")
+      
+      future <- rast(future_file)
+      no_disp <- calc_no_dispersal(baseline, future)
+      
+      # Save result
+      writeRaster(
+        no_disp,
+        file.path(out_dir, paste0("no_dispersal_", time_period, ".tif")),
+        overwrite = TRUE
+      )
+      
+      # Calculate and store range loss
+      no_disp_sum <- global(no_disp, "sum", na.rm = TRUE)[1, 1]
+      range_loss <- 1 - (no_disp_sum / baseline_sum)
+      
+      range_loss_results <- rbind(
+        range_loss_results,
+        data.frame(
+          species = sp_name,
+          scenario = scenario,
+          period = time_period,
+          baseline_sum = baseline_sum,
+          no_dispersal_sum = no_disp_sum,
+          range_loss = range_loss
+        )
+      )
+    }
+  }
+}
+
+# Export results
+write.csv(
+  range_loss_results,
+  "./output/range_loss_summary.csv",
+  row.names = FALSE
+)
