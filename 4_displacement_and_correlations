@@ -1,0 +1,115 @@
+# Analyse species displacement of end-century (2090-2100) in relation to baseline
+# AND correlation with refugia metrics
+
+library(terra)
+library(fs)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(geodist)
+library(ggrepel)
+
+base_dir <- "./results/"
+thresholds <- read.csv("./data/thresholds.csv", row.names = 1)[[1]]
+
+# ============================================================================
+
+weighted_centroid <- function(r) {
+  df <- as.data.frame(r, xy = TRUE, na.rm = TRUE)
+  names(df)[3] <- "suit"
+  df <- df[df$suit > 0, ]
+  if (nrow(df) == 0) return(NULL)
+  c(lon = weighted.mean(df$x, df$suit), lat = weighted.mean(df$y, df$suit))
+}
+
+refugia_area_km2 <- function(r) {
+  a <- cellSize(r, unit = "km")
+  sum(values(a)[values(r) > 0], na.rm = TRUE)
+}
+
+# ============================================================================
+
+displacements <- list()
+
+for (sp in names(thresholds)) {
+  sp_dir <- file.path(base_dir, sp)
+  
+  base_file <- dir_ls(file.path(sp_dir, "projections/baseline/"), glob = "*.tif", fail = FALSE)[1]
+  fut_file <- dir_ls(file.path(sp_dir, "projections/ssp585_limited_dispersal/"), glob = "*_7*.tif", fail = FALSE)[1]
+  
+  if (is.na(base_file) || is.na(fut_file)) next
+  
+  r_base <- clamp(rast(base_file), 0, 1)
+  r_fut <- clamp(rast(fut_file), 0, 1)
+  
+  cb <- weighted_centroid(r_base)
+  cf <- weighted_centroid(r_fut)
+  if (is.null(cb) || is.null(cf)) next
+  
+  dist_km <- geodist(rbind(c(cb["lon"], cb["lat"]), c(cf["lon"], cf["lat"])), measure = "haversine")[1, 2] / 1000
+  lat_shift <- cf["lat"] - cb["lat"]
+  
+  displacements[[sp]] <- data.frame(
+    species = sp,
+    distance_km = dist_km,
+    lat_shift_deg = lat_shift,
+    shift_direction = ifelse(lat_shift > 0, "Poleward", "Equatorward")
+  )
+}
+
+disp_df <- bind_rows(displacements)
+
+# Load refugia metrics
+refugia_files <- dir_ls("./data/refugia/", glob = "*.tif", fail = FALSE)
+
+metrics <- lapply(refugia_files, function(f) {
+  r <- rast(f)
+  data.frame(
+    species = gsub("_refugia.*", "", basename(f)),
+    refugia_area_km2 = refugia_area_km2(r),
+    mean_refugia_strength = global(r, mean, na.rm = TRUE)[1, 1]
+  )
+}) |> bind_rows()
+
+analysis_df <- left_join(disp_df, metrics, by = "species") |>
+  filter(!is.na(distance_km), !is.na(refugia_area_km2)) |>
+  mutate(
+    species_plot = gsub("_", " ", species),
+    lat_shift_km = lat_shift_deg * 111.32,
+    area_per_strength = refugia_area_km2 / mean_refugia_strength
+  )
+
+# Correlations
+cor_strength <- cor.test(analysis_df$distance_km, analysis_df$mean_refugia_strength, method = "spearman")
+cor_area <- cor.test(analysis_df$distance_km, analysis_df$refugia_area_km2, method = "spearman")
+
+# ============================================================================
+# Plots
+# ============================================================================
+
+p_strength <- ggplot(analysis_df, aes(mean_refugia_strength, distance_km)) +
+  geom_point(aes(color = shift_direction), size = 3, alpha = 0.9) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30", linewidth = 0.6) +
+  geom_text_repel(aes(label = species_plot), size = 3, fontface = "italic", max.overlaps = 20) +
+  scale_y_log10(labels = scales::comma) +
+  scale_color_manual(values = c("Poleward" = "#2166ac", "Equatorward" = "#b2182b")) +
+  labs(
+    x = "Mean refugia strength",
+    y = "Displacement distance (km)",
+    color = "Latitudinal shift",
+    title = "A",
+    subtitle = paste0("Spearman ρ = ", round(cor_strength$estimate, 2), ", p = ", signif(cor_strength$p.value, 2))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+
+p_latshift <- ggplot(analysis_df, aes(reorder(species_plot, lat_shift_km), lat_shift_km)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  geom_point(aes(color = shift_direction), size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Poleward" = "#2166ac", "Equatorward" = "#b2182b")) +
+  labs(x = NULL, y = "Latitudinal shift (km)", color = "Shift direction", title = "B") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), axis.text.y = element_text(face = "italic"), legend.position = "none")
+
+p_strength | p_latshift
