@@ -1,3 +1,5 @@
+# NO DISPERSAL ASSUMPTION
+
 # Calculate range loss under no-dispersal scenarios
 library(terra)
 library(fs)
