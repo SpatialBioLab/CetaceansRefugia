@@ -1,0 +1,55 @@
+# Environmental thinning of species occurrences
+library(terra)
+library(flexsdm)
+
+# Load data
+data <- read.csv("./data/occurrences.csv")
+
+# Load environmental variables
+env_rasters <- rast(list.files("./data/environmental/", pattern = "\\.tif$", full.names = TRUE))
+
+# Select species and add ID
+species_data <- data[data$Species == "species_name", ]
+species_data$id <- seq_len(nrow(species_data))
+
+# Environmental thinning with multiple bin configurations
+thinning_results <- flexsdm::occfilt_env(
+  data = as.data.frame(species_data),
+  x = "lon",
+  y = "lat",
+  id = "id",
+  env_layer = env_rasters,
+  nbins = c(15, 20, 30, 40)
+)
+
+# Select best configuration
+selected <- occfilt_select(
+  occ_list = thinning_results,
+  x = "lon",
+  y = "lat",
+  env_layer = env_rasters,
+  filter_prop = TRUE
+)
+
+# Evaluate trade-offs
+metrics <- selected$filter_prop
+metrics$bin_value <- as.numeric(gsub("[^0-9]", "", metrics$filt_value))
+metrics$autocorr_norm <- scales::rescale(metrics$mean_autocorr, to = c(0, 1))
+metrics$records_norm <- scales::rescale(metrics$n_records, to = c(0, 1))
+metrics$distance <- sqrt(metrics$autocorr_norm^2 + (1 - metrics$records_norm)^2)
+
+# Identify optimal configuration
+optimal <- metrics[which.min(metrics$distance), ]
+
+# Visualize trade-off
+plot(metrics$records_norm, metrics$autocorr_norm, type = "b", pch = 19,
+     xlab = "Normalized number of records (↑)", ylab = "Normalized autocorrelation (↓)",
+     main = "Environmental thinning trade-off")
+text(metrics$records_norm, metrics$autocorr_norm, metrics$bin_value, pos = 3, cex = 0.8)
+points(optimal$records_norm, optimal$autocorr_norm, pch = 19, col = "red", cex = 1.5)
+grid()
+
+# Export filtered occurrences (adjust bin value based on optimal)
+best_bin <- as.character(optimal$bin_value)
+thinned_data <- as.data.frame(thinning_results[[best_bin]])
+write.csv(thinned_data, "./output/occurrences_thinned.csv", row.names = FALSE)
