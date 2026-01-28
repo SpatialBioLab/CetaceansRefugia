@@ -1,0 +1,129 @@
+# Define climate refugia based on relative change across dispersal scenarios
+library(terra)
+library(fs)
+library(dplyr)
+library(ggplot2)
+
+base_dir <- "./results/"
+thresholds <- read.csv("./data/thresholds.csv", row.names = 1)[[1]]
+output_dir <- "./refugia/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ============================================================================
+
+cat("\n--- Calculating refugia (relative change, 0-6 scenarios) ---\n")
+
+for (sp in names(thresholds)) {
+  cat("Processing:", sp, "\n")
+  
+  sp_dir <- file.path(base_dir, sp)
+  threshold <- thresholds[sp]
+  
+  # Load baseline
+  baseline <- rast(dir_ls(file.path(sp_dir, "projections/baseline/"), glob = "*.tif", fail = FALSE)[1])
+  baseline_norm <- clamp(baseline, 0, 1)
+  
+  # Define all 6 scenarios: 2 SSPs × 3 dispersal
+  scenarios <- list(
+    ssp119_full = file.path(sp_dir, "projections/ssp119/"),
+    ssp119_limited = file.path(sp_dir, "projections/ssp119_limited_dispersal/"),
+    ssp119_none = file.path(sp_dir, "projections/ssp119_no_dispersal/"),
+    ssp585_full = file.path(sp_dir, "projections/ssp585/"),
+    ssp585_limited = file.path(sp_dir, "projections/ssp585_limited_dispersal/"),
+    ssp585_none = file.path(sp_dir, "projections/ssp585_no_dispersal/")
+  )
+  
+  refugia_list <- list()
+  
+  for (sc_name in names(scenarios)) {
+    files <- dir_ls(scenarios[[sc_name]], glob = "*.tif", fail = FALSE)
+    if (length(files) == 0) next
+    
+    r_2100 <- rast(sort(files)[length(files)])  # final time period
+    relative_change <- (r_2100 - baseline_norm) / (baseline_norm + 0.01)
+    
+    median_change <- global(relative_change, median, na.rm = TRUE)[1, 1]
+    refugia_list[[sc_name]] <- relative_change > median_change
+  }
+  
+  if (length(refugia_list) < 6) {
+    warning("Skipping ", sp, ": missing scenarios")
+    next
+  }
+  
+  # Align grids and stack
+  ref <- refugia_list[[1]]
+  refugia_list <- lapply(refugia_list, resample, y = ref, method = "near")
+  
+  # Sum across scenarios (0-6 scale)
+  refuge_count <- Reduce(`+`, refugia_list)
+  refuge_final <- refuge_count * clamp(baseline_norm, 0, 1)
+  
+  writeRaster(refuge_final, file.path(output_dir, paste0(sp, "_refugia.tif")), overwrite = TRUE)
+  cat("  ✓ Saved\n")
+}
+
+# ============================================================================
+# Categorize refugia strength
+# ============================================================================
+
+cat("\n--- Categorizing refugia strength ---\n")
+
+rcl_mat <- matrix(c(
+  -Inf, 0.1, 0,
+  0.1, 1.5, 1,
+  1.5, 2.5, 2,
+  2.5, 3.5, 3,
+  3.5, 4.5, 4,
+  4.5, Inf, 5
+), ncol = 3, byrow = TRUE)
+
+refugia_files <- dir_ls(output_dir, glob = "*_refugia.tif")
+
+for (f in refugia_files) {
+  r_cat <- classify(rast(f), rcl = rcl_mat)
+  writeRaster(r_cat, sub(".tif", "_cat.tif", f), overwrite = TRUE)
+}
+
+# ============================================================================
+# Visualize refugia per species
+# ============================================================================
+
+cat("\n--- Creating refugia maps ---\n")
+
+refugia_files_cat <- dir_ls(output_dir, glob = "*_refugia_cat.tif")
+
+refugia_df <- lapply(refugia_files_cat, function(f) {
+  sp_name <- gsub("_refugia_cat.tif", "", basename(f))
+  r <- rast(f)
+  df <- as.data.frame(r, xy = TRUE, na.rm = FALSE)
+  names(df)[3] <- "strength"
+  df$species <- gsub("_", " ", sp_name)
+  df
+}) |> bind_rows()
+
+p_species <- ggplot(refugia_df) +
+  geom_raster(aes(x = x, y = y, fill = factor(strength))) +
+  coord_equal(expand = FALSE) +
+  scale_fill_manual(
+    name = "Strength",
+    na.value = "white", drop = FALSE
+  ) +
+  facet_wrap(~ species, ncol = 4) +
+  theme_void() +
+  theme(strip.text = element_text(size = 9, face = "italic"), legend.position = "right")
+
+# ============================================================================
+# Calculate refugia richness across all species
+# ============================================================================
+
+refugia_continuous <- lapply(dir_ls(output_dir, glob = "*_refugia.tif" , invert = TRUE), rast)
+refugia_continuous <- lapply(refugia_continuous, resample, y = refugia_continuous[[1]], method = "near")
+
+richness <- Reduce(`+`, refugia_continuous)
+writeRaster(richness, file.path(output_dir, "refugia_richness.tif"), overwrite = TRUE)
+
+rcl_richness <- matrix(c(-Inf, 1, 0, 1, 16, 1, 16, 32, 2, 32, 48, 3, 48, 64, 4, 64, Inf, 5), ncol = 3, byrow = TRUE)
+richness_cat <- classify(richness, rcl = rcl_richness)
+writeRaster(richness_cat, file.path(output_dir, "refugia_richness_cat.tif"), overwrite = TRUE)
+
