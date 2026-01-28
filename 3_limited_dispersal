@@ -1,0 +1,89 @@
+# LIMITED DISPERSAL ASSUMPTION
+
+# Calculate range loss under limited dispersal scenarios
+library(terra)
+library(fs)
+library(future)
+library(furrr)
+
+base_dir <- "./results/"
+scenarios <- c("ssp119", "ssp585")
+
+# Load species thresholds from file
+thresholds <- read.csv("./data/thresholds.csv", row.names = 1)[[1]]
+
+# ============================================================================
+
+process_species <- function(sp_name, base_dir, thresholds, scenarios) {
+  library(terra)
+  library(fs)
+  
+  cat("Processing:", sp_name, "\n")
+  
+  sp_dir <- file.path(base_dir, sp_name)
+  threshold <- thresholds[sp_name]
+  
+  baseline_geo <- rast(dir_ls(file.path(sp_dir, "projections/baseline/"), glob = "*.tif"))
+  baseline_proj <- project(baseline_geo, crs_proj)
+  suitable <- baseline_proj > threshold
+  suitable[suitable == 0] <- NA
+  
+  # Dispersal buffers with distance decay
+  dist_class <- rast(suitable)
+  values(dist_class) <- NA
+  dist_class[!is.na(buffer(suitable, 10000))] <- 1
+  dist_class[is.na(dist_class) & !is.na(buffer(suitable, 40000))] <- 2
+  dist_class[is.na(dist_class) & !is.na(buffer(suitable, 80000))] <- 3
+  
+  connectivity <- classify(dist_class, rbind(c(1, 1, 1.0), c(2, 2, 0.2), c(3, 3, 0.02)))
+  connectivity[is.na(connectivity)] <- 0
+  
+  baseline_sum <- global(suitable, "sum", na.rm = TRUE)[1, 1]
+  results <- list()
+  
+  for (scenario in scenarios) {
+    cat("  Scenario:", scenario, "\n")
+    
+    future_dir <- file.path(sp_dir, "projections", scenario)
+    out_dir <- file.path(sp_dir, "projections", paste0(scenario, "_limited_dispersal"))
+    dir_create(out_dir)
+    
+    for (future_file in dir_ls(future_dir, glob = "*.tif")) {
+      period <- tools::file_path_sans_ext(basename(future_file))
+      
+      limited_proj <- project(rast(future_file), crs_proj) * connectivity
+      limited_geo <- project(limited_proj, crs_geo)
+      
+      writeRaster(limited_geo, file.path(out_dir, paste0("limited_", period, ".tif")), overwrite = TRUE)
+      
+      limited_sum <- global(limited_proj > threshold, "sum", na.rm = TRUE)[1, 1]
+      
+      results[[paste0(scenario, "_", period)]] <- data.frame(
+        species = sp_name, scenario = scenario, period = period,
+        baseline_cells = baseline_sum, limited_cells = limited_sum,
+        range_loss = 1 - (limited_sum / baseline_sum)
+      )
+    }
+  }
+  
+  do.call(rbind, results)
+}
+
+# ============================================================================
+
+cat("\n--- Processing species ---\n")
+
+results_file <- "./output/range_loss_limited_dispersal.csv"
+completed <- if (file.exists(results_file)) unique(read.csv(results_file)$species) else c()
+remaining <- setdiff(names(thresholds), completed)
+
+if (length(remaining) > 0) {
+  all_results <- future_map(remaining, ~process_species(., base_dir, thresholds, scenarios), .progress = TRUE)
+  all_results <- do.call(rbind, all_results)
+  
+  if (file.exists(results_file)) {
+    all_results <- rbind(read.csv(results_file), all_results)
+  }
+  
+  write.csv(all_results, results_file, row.names = FALSE)
+}
