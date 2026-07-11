@@ -19,7 +19,7 @@ thinning_results <- flexsdm::occfilt_env(
   y = "lat",
   id = "id",
   env_layer = env_rasters,
-  nbins = c(15, 20, 30, 40)
+  nbins = c(15, 20, 30, 40, 60, 80)
 )
 
 # Select best configuration
